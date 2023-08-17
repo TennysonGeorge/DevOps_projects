@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: This is a scheduled Fargate Task Template set to make an API request to https://uselessfacts.jsph.pl/api/v2/facts/random to pull some unless facts as text every minute 
+
+# Here are the parameters for the VPC and subnets assuming that the VPC/subnet(s) have already been deployed and their IDs can be provided via parameters
+# The provided subnet(s) already have access to the internet via a NAT Gateway, but you can add the name of the gateway as an parameters option 
+
+Parameters:
+  vpcId:
+    Type: "AWS::EC2::VPC::Id"
+    Description: Optional - Specifies the ID of an existing VPC in which to launch your container instances.
+    AllowedPattern: '^(?:vpc-[0-9a-f]{8,17}|)$'
+    ConstraintDescription: VPC Id must begin with 'vpc-' and have a valid uuid
+  subnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet ID where the Fargate task should be deployed
+  natGatewayIds:
+    Type: String
+    Description: Optical specifies the comma-separated list of existing NAT gateway IDs that will run
+
+# This is not needed unless we need to run a specific image in our ECS cluster 
+#  MyECRRepo:
+#    Description: ECR repository
+#    Type: String
+#    Default: " "
+
+
+# The next lines of code lists the AWS resources that I'll use to complete the automated task 
+
+Resources:
+  scheduledTaskCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: scheduledTaskCluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+  
+  scheduledFargateTask:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: schedule rule for task
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+
+      # I think this is where the issue might be with error about Requested attribute Arn does not exist in schema for AWS::ECS::TaskDefinition
+      # When I run the stack, the only resources that cloudfront was unable to create is the AWS::Events::Rule
+      # Might have to change the targets arn 
+      Targets:
+        - Arn: !GetAtt fargateTask.Arn
+          Id: "FargateTask"
+          RoleArn: !GetAtt fargateTask.Arn
+          EcsParameters:
+            TaskDefinitionArn: !Ref fargateTask
+            LaunchType: FARGATE
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: DISABLED
+                Subnets:
+                  - !Ref subnetId
+
+# This is the scheduled task set to make an API request to https://uselessfacts.jsph.pl/api/v2/facts/random to pull some unless facts as text
+
+  fargateTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref fargateTaskExecutionRole
+      TaskRoleArn: !Ref fargateTaskRole
+      Cpu: '1024'
+      Memory: '2048'
+      ContainerDefinitions:
+        - Name: fargateContainer
+          Image: public.ecr.aws/docker/library/ubuntu:mantic-20230511.1
+          Command:
+            - /bin/bash
+            - -c
+            - "curl -s https://uselessfacts.jsph.pl/api/v2/facts/random | jq -r '.text'"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref fargateTaskLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: fargateContainer
+
+# This code was to update the FargateTask resource to include an Outputs section that exports the Task Definition ARN: But I'm running into some error trying to fix this part. 
+# I'm getting an error about Requested attribute Arn does not exist in schema for AWS::ECS::TaskDefinition
+# Maybe some code review and team discussion might help fix this issue, also might need to change the container image that is used above
+# Outputs:
+  # FargateTaskDefinitionArn:
+    # Value: !Ref FargateTask
+    # Export:
+      # Name: FargateTaskDefinitionArn
+#    DependsOn:
+#      - MyECRRepo
+
+
+# The IAM role and policy scheduled task execution 
+  fargateTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FargateTaskExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${AWS::StackName}-*'
+      Path: "/"
+
+  fargateTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: fargateTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: fargateTaskPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - ssm:DescribeParameters
+                  - ssm:GetParametersByPath
+                  - ecs:RunTask
+                Resource: '*'
+      Path: "/"
+
+
+# This code will create Amazon CloudWatch Logs log group that will be created when the CloudFormation stack is deployed.
+# So creates a CloudWatch Logs log group and exposes its name as an output value for potential use by other resources or stacks.
+
+  fargateTaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
+
+Outputs:
+  fargateTaskLogGroupName:
+    Value: !Ref fargateTaskLogGroup
+    Export:
+      Name: fargateTaskLogGroupName
+     
+     
